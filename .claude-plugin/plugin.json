@@ -1,0 +1,13 @@
+{
+  "name": "cc-simple-memory",
+  "version": "1.0.0",
+  "description": "Persistent cross-session memory for Claude Code. Hooks extract learnings automatically; Sonnet + Opus maintain MEMORY.md files per project and globally.",
+  "author": {
+    "name": "samuelreed",
+    "url": "https://github.com/samuelreed/cc-simple-memory"
+  },
+  "homepage": "https://github.com/samuelreed/cc-simple-memory",
+  "repository": "https://github.com/samuelreed/cc-simple-memory",
+  "license": "MIT",
+  "keywords": ["memory", "persistence", "learning", "hooks"]
+}

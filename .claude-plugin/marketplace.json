@@ -1,0 +1,14 @@
+{
+  "name": "cc-simple-memory-dev",
+  "description": "Dev marketplace for cc-simple-memory plugin",
+  "owner": { "name": "samuelreed" },
+  "plugins": [
+    {
+      "name": "cc-simple-memory",
+      "description": "Persistent cross-session memory for Claude Code",
+      "version": "1.0.0",
+      "source": "./",
+      "author": { "name": "samuelreed" }
+    }
+  ]
+}
