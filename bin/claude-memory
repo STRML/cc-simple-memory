@@ -1,0 +1,663 @@
+#!/bin/bash
+# claude-memory — CLI toolkit for Claude Code's persistent memory system
+#
+# Memory Architecture:
+#   Project memory:  ~/.claude/projects/<encoded-path>/memory/MEMORY.md
+#   Global memory:   ~/.claude/rules/global-memory.md
+#   Extraction log:  /tmp/claude/extract-learnings.log
+#   Transcripts:     ~/.claude/projects/<encoded-path>/*.jsonl
+#
+# The Stop hook (extract-learnings.sh) runs after each session and uses
+# background Sonnet to extract learnings into both project + global memory.
+# Primary mechanism is proactive in-session updates via CLAUDE.md instructions.
+
+set -euo pipefail
+
+# Resolve plugin root from this script's real location (handles symlinks)
+_resolve_plugin_root() {
+  local source="${BASH_SOURCE[0]}"
+  while [ -L "$source" ]; do
+    local dir
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" != /* ]] && source="$dir/$source"
+  done
+  # Script is in bin/, plugin root is one level up
+  dirname "$(cd -P "$(dirname "$source")" && pwd)"
+}
+PLUGIN_ROOT="$(_resolve_plugin_root)"
+GC_SCRIPT="${PLUGIN_ROOT}/hooks/gc-memory.sh"
+
+CLAUDE_DIR="${HOME}/.claude"
+LOG_FILE="/tmp/claude/extract-learnings.log"
+GLOBAL_MEMORY="${CLAUDE_DIR}/rules/global-memory.md"
+
+# Resolve project memory path from a directory
+# Claude Code encodes both '/' and '.' as '-' in project directory names.
+project_memory_path() {
+  local dir="${1:-$(pwd)}"
+  local encoded=$(echo "$dir" | sed 's|[/.]|-|g')
+  echo "${CLAUDE_DIR}/projects/${encoded}/memory/MEMORY.md"
+}
+
+# Resolve project transcripts dir
+project_transcripts_dir() {
+  local dir="${1:-$(pwd)}"
+  local encoded=$(echo "$dir" | sed 's|[/.]|-|g')
+  echo "${CLAUDE_DIR}/projects/${encoded}"
+}
+
+usage() {
+  cat <<'EOF'
+claude-memory — manage Claude Code persistent memory
+
+USAGE:
+  claude-memory <command> [options]
+
+COMMANDS:
+  show [project|global|archive|all]  Display memory files (default: all)
+  search <query> [--all]      Search transcripts for a concept
+  log [N]                     Show last N lines of extraction log (default: 30)
+  stats                       Show memory system statistics
+  extract [--dry-run]         Manually trigger extraction for current project
+  gc [--dry-run]              Garbage-collect memory files (prune stale/redundant entries)
+
+EXAMPLES:
+  claude-memory show                    # Show both project + global active memory
+  claude-memory show archive             # Show project + global archives (cold storage)
+  claude-memory search "sandbox"        # Search current project transcripts
+  claude-memory search "Docker" --all   # Search ALL project transcripts
+  claude-memory log                     # Recent extraction activity
+  claude-memory log 100                 # Last 100 lines of log
+  claude-memory stats                   # Memory sizes, transcript counts
+  claude-memory extract --dry-run       # Preview what extraction would find
+  claude-memory gc                      # Run Opus GC on oversized memory files
+  claude-memory gc --dry-run            # Preview GC output without writing
+
+PATHS:
+  Project memory:   ~/.claude/projects/<encoded-path>/memory/MEMORY.md
+  Project archive:  ~/.claude/projects/<encoded-path>/memory/ARCHIVE.md
+  Global memory:    ~/.claude/rules/global-memory.md
+  Global archive:   ~/.claude/memory/global-archive.md
+  Extraction log:   /tmp/claude/extract-learnings.log
+EOF
+}
+
+cmd_show() {
+  local scope="${1:-all}"
+  local project_mem=$(project_memory_path)
+
+  case "$scope" in
+    project)
+      if [ -f "$project_mem" ]; then
+        echo "=== Project Memory: $project_mem ==="
+        echo ""
+        cat "$project_mem"
+      else
+        echo "No project memory found for $(pwd)"
+      fi
+      ;;
+    global)
+      if [ -f "$GLOBAL_MEMORY" ]; then
+        echo "=== Global Memory: $GLOBAL_MEMORY ==="
+        echo ""
+        cat "$GLOBAL_MEMORY"
+      else
+        echo "No global memory found"
+      fi
+      ;;
+    all)
+      if [ -f "$project_mem" ]; then
+        echo "=== Project Memory ($(wc -c < "$project_mem" | tr -d ' ')B) ==="
+        echo ""
+        cat "$project_mem"
+        echo ""
+      fi
+      if [ -f "$GLOBAL_MEMORY" ]; then
+        echo "=== Global Memory ($(wc -c < "$GLOBAL_MEMORY" | tr -d ' ')B) ==="
+        echo ""
+        cat "$GLOBAL_MEMORY"
+      fi
+      ;;
+    archive)
+      local project_archive="${project_mem%MEMORY.md}ARCHIVE.md"
+      local global_archive="${CLAUDE_DIR}/memory/global-archive.md"
+      if [ -f "$project_archive" ]; then
+        local lines=$(wc -l < "$project_archive" | tr -d ' ')
+        echo "=== Project Archive (${lines} lines) ==="
+        echo ""
+        cat "$project_archive"
+        echo ""
+      else
+        echo "No project archive found"
+      fi
+      if [ -f "$global_archive" ]; then
+        local lines=$(wc -l < "$global_archive" | tr -d ' ')
+        echo "=== Global Archive (${lines} lines) ==="
+        echo ""
+        cat "$global_archive"
+      else
+        echo "No global archive found"
+      fi
+      ;;
+    *)
+      echo "Unknown scope: $scope (use project, global, archive, or all)"
+      exit 1
+      ;;
+  esac
+}
+
+cmd_search() {
+  local query="$1"
+  shift
+  local search_all=false
+
+  for arg in "$@"; do
+    case "$arg" in
+      --all) search_all=true ;;
+    esac
+  done
+
+  if [ "$search_all" = true ]; then
+    echo "=== Searching ALL transcripts for: $query ==="
+    echo ""
+    # Search across all project transcript dirs
+    for project_dir in "${CLAUDE_DIR}/projects/"*/; do
+      [ ! -d "$project_dir" ] && continue
+      local found=false
+      for jsonl in "$project_dir"*.jsonl; do
+        [ ! -f "$jsonl" ] && continue
+        # Filter to conversation text and search
+        matches=$(python3 -c "
+import json, re, sys
+query = sys.argv[2].lower()
+with open(sys.argv[1]) as f:
+    for i, line in enumerate(f):
+        try:
+            entry = json.loads(line)
+        except: continue
+        if entry.get('type') not in ('user', 'assistant'): continue
+        msg = entry.get('message', {})
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            content = ' '.join(b.get('text','') for b in content if isinstance(b, dict) and b.get('type')=='text')
+        content = re.sub(r'<system-reminder>.*?</system-reminder>', '', str(content), flags=re.DOTALL)
+        if query in content.lower():
+            role = msg.get('role', entry.get('type',''))
+            preview = content[:200].replace('\n', ' ').strip()
+            print(f'  [{role}] {preview}')
+" "$jsonl" "$query" 2>/dev/null || true)
+        if [ -n "$matches" ]; then
+          if [ "$found" = false ]; then
+            echo "--- ${project_dir##*/projects/} ---"
+            found=true
+          fi
+          echo "  ${jsonl##*/}:"
+          echo "$matches" | head -5
+          local count=$(echo "$matches" | wc -l | tr -d ' ')
+          if [ "$count" -gt 5 ]; then
+            echo "  ... and $((count - 5)) more matches"
+          fi
+        fi
+      done
+    done
+  else
+    local transcripts_dir=$(project_transcripts_dir)
+    echo "=== Searching project transcripts for: $query ==="
+    echo ""
+    if [ ! -d "$transcripts_dir" ]; then
+      echo "No transcripts found for $(pwd)"
+      exit 1
+    fi
+    for jsonl in "$transcripts_dir"/*.jsonl; do
+      [ ! -f "$jsonl" ] && continue
+      matches=$(python3 -c "
+import json, re, sys
+query = sys.argv[2].lower()
+with open(sys.argv[1]) as f:
+    for line in f:
+        try:
+            entry = json.loads(line)
+        except: continue
+        if entry.get('type') not in ('user', 'assistant'): continue
+        msg = entry.get('message', {})
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            content = ' '.join(b.get('text','') for b in content if isinstance(b, dict) and b.get('type')=='text')
+        content = re.sub(r'<system-reminder>.*?</system-reminder>', '', str(content), flags=re.DOTALL)
+        if query in content.lower():
+            role = msg.get('role', entry.get('type',''))
+            preview = content[:200].replace('\n', ' ').strip()
+            print(f'  [{role}] {preview}')
+" "$jsonl" "$query" 2>/dev/null || true)
+      if [ -n "$matches" ]; then
+        echo "${jsonl##*/}:"
+        echo "$matches" | head -10
+        local count=$(echo "$matches" | wc -l | tr -d ' ')
+        if [ "$count" -gt 10 ]; then
+          echo "  ... and $((count - 10)) more matches"
+        fi
+        echo ""
+      fi
+    done
+  fi
+}
+
+cmd_log() {
+  local lines="${1:-30}"
+  if [ -f "$LOG_FILE" ]; then
+    echo "=== Extraction Log (last $lines lines) ==="
+    echo ""
+    tail -n "$lines" "$LOG_FILE"
+  else
+    echo "No extraction log found at $LOG_FILE"
+  fi
+}
+
+cmd_stats() {
+  local project_mem=$(project_memory_path)
+  local transcripts_dir=$(project_transcripts_dir)
+
+  echo "=== Memory System Stats ==="
+  echo ""
+
+  # Project memory
+  if [ -f "$project_mem" ]; then
+    local size=$(wc -c < "$project_mem" | tr -d ' ')
+    local lines=$(wc -l < "$project_mem" | tr -d ' ')
+    echo "Project memory: ${size}B, ${lines} lines"
+  else
+    echo "Project memory: not found"
+  fi
+
+  # Global memory
+  if [ -f "$GLOBAL_MEMORY" ]; then
+    local size=$(wc -c < "$GLOBAL_MEMORY" | tr -d ' ')
+    local lines=$(wc -l < "$GLOBAL_MEMORY" | tr -d ' ')
+    echo "Global memory:  ${size}B, ${lines} lines"
+  else
+    echo "Global memory:  not found"
+  fi
+
+  echo ""
+
+  # Archives
+  local project_archive="${project_mem%MEMORY.md}ARCHIVE.md"
+  local global_archive="${CLAUDE_DIR}/memory/global-archive.md"
+  if [ -f "$project_archive" ]; then
+    local size=$(wc -c < "$project_archive" | tr -d ' ')
+    local lines=$(wc -l < "$project_archive" | tr -d ' ')
+    echo "Project archive: ${size}B, ${lines} lines (cold storage)"
+  else
+    echo "Project archive: empty"
+  fi
+  if [ -f "$global_archive" ]; then
+    local size=$(wc -c < "$global_archive" | tr -d ' ')
+    local lines=$(wc -l < "$global_archive" | tr -d ' ')
+    echo "Global archive:  ${size}B, ${lines} lines (cold storage)"
+  else
+    echo "Global archive:  empty"
+  fi
+
+  echo ""
+
+  # Transcripts
+  if [ -d "$transcripts_dir" ]; then
+    local count=$(ls "$transcripts_dir"/*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+    local total_size=$(du -sh "$transcripts_dir"/*.jsonl 2>/dev/null | tail -1 | cut -f1 || echo "0")
+    echo "Project transcripts: $count sessions"
+
+    # All projects
+    local all_count=0
+    for d in "${CLAUDE_DIR}/projects/"*/; do
+      [ ! -d "$d" ] && continue
+      local c=$(ls "$d"*.jsonl 2>/dev/null | wc -l | tr -d ' ')
+      all_count=$((all_count + c))
+    done
+    local project_count=$(ls -d "${CLAUDE_DIR}/projects/"*/ 2>/dev/null | wc -l | tr -d ' ')
+    echo "All transcripts:     $all_count sessions across $project_count projects"
+  fi
+
+  echo ""
+
+  # Extraction log
+  if [ -f "$LOG_FILE" ]; then
+    local extractions=$(grep -c "Extracting from" "$LOG_FILE" 2>/dev/null || echo "0")
+    local writes=$(grep -c "Wrote.*B to" "$LOG_FILE" 2>/dev/null || echo "0")
+    local last=$(tail -1 "$LOG_FILE" 2>/dev/null || echo "never")
+    echo "Extractions run: $extractions"
+    echo "Successful writes: $writes"
+    echo "Last activity: $last"
+  else
+    echo "No extraction log found"
+  fi
+
+  # Lock status
+  if [ -f "/tmp/claude/extract-learnings.lock" ]; then
+    local lock_age=$(find "/tmp/claude/extract-learnings.lock" -mmin +0 -printf "%T+" 2>/dev/null || stat -f "%Sm" "/tmp/claude/extract-learnings.lock" 2>/dev/null || echo "unknown")
+    echo ""
+    echo "WARNING: Lock file exists (extraction may be running)"
+    echo "Lock file: /tmp/claude/extract-learnings.lock"
+  fi
+}
+
+cmd_extract() {
+  local dry_run=false
+  for arg in "$@"; do
+    case "$arg" in
+      --dry-run) dry_run=true ;;
+    esac
+  done
+
+  local project_cwd="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+  local encoded_path=$(echo "$project_cwd" | sed 's|[/.]|-|g')
+  local claude_project_dir="${CLAUDE_DIR}/projects/${encoded_path}"
+  local memory_dir="${claude_project_dir}/memory"
+  local memory_file="${memory_dir}/MEMORY.md"
+  local LOG="/tmp/claude/extract-learnings.log"
+
+  mkdir -p "$memory_dir"
+
+  if [ ! -d "$claude_project_dir" ]; then
+    echo "No Claude project dir found for $project_cwd — skipping" >&2
+    exit 0
+  fi
+
+  transcript=$(ls -t "$claude_project_dir"/*.jsonl 2>/dev/null | head -1 || true)
+  if [ -z "$transcript" ]; then
+    echo "No transcripts found in $claude_project_dir — skipping" >&2
+    exit 0
+  fi
+
+  msg_count=$(grep -c '"type":"user"' "$transcript" 2>/dev/null || echo "0")
+  size=$(wc -c < "$transcript" | tr -d ' ')
+
+  echo "Latest transcript: ${transcript##*/}" >&2
+  echo "Messages: $msg_count user messages, ${size}B total" >&2
+
+  if [ "$dry_run" = true ]; then
+    echo ""
+    echo "Filtering transcript..."
+    filtered="/tmp/claude/dry-run-filtered-$$.md"
+    python3 -c "
+import json, re, sys
+parts = []
+with open(sys.argv[1]) as f:
+    for line in f:
+        try: entry = json.loads(line)
+        except: continue
+        if entry.get('type') not in ('user', 'assistant'): continue
+        msg = entry.get('message', {})
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            content = '\n'.join(b.get('text','') for b in content if isinstance(b, dict) and b.get('type')=='text')
+        content = re.sub(r'<system-reminder>.*?</system-reminder>', '', str(content), flags=re.DOTALL).strip()
+        if content:
+            role = msg.get('role', entry.get('type',''))
+            parts.append(f'## {role}\n{content}\n')
+with open(sys.argv[2], 'w') as f: f.write('\n'.join(parts))
+" "$transcript" "$filtered"
+    filtered_size=$(wc -c < "$filtered" | tr -d ' ')
+    echo "Filtered: ${size}B → ${filtered_size}B"
+    exchange_count=$(grep -c '^## user' "$filtered" || echo "0")
+    echo "Exchanges: $exchange_count"
+    if grep -qE '^SKIP_MEMORY_EXTRACTION$' "$filtered" 2>/dev/null; then
+      echo "Opt-out: SKIP_MEMORY_EXTRACTION marker detected — extraction would be skipped"
+    elif [ "$exchange_count" -gt 20 ] && [ "$filtered_size" -gt 30000 ]; then
+      echo "Condensation: would trigger (${exchange_count} exchanges, ${filtered_size}B) — Haiku pre-summarization"
+    else
+      echo "Condensation: not needed (${exchange_count} exchanges, ${filtered_size}B)"
+    fi
+    echo ""
+    echo "First 50 lines of filtered content:"
+    head -50 "$filtered"
+    rm -f "$filtered"
+    exit 0
+  fi
+
+  if [ "$msg_count" -lt 5 ]; then
+    echo "Skipping: fewer than 5 user messages" >&2
+    exit 0
+  fi
+
+  lock_file="/tmp/claude/extract-learnings-${encoded_path}.lock"
+  if [ -f "$lock_file" ]; then
+    if [ -n "$(find "$lock_file" -mmin +60 2>/dev/null)" ]; then
+      rm -f "$lock_file"
+    else
+      echo "Skipping: extraction recently ran (lock file exists)" >&2
+      exit 0
+    fi
+  fi
+  touch "$lock_file"
+
+  (
+    set +e
+    filtered="/tmp/claude/filtered-transcript-$$.md"
+    python3 -c "
+import json, re, sys
+parts = []
+with open(sys.argv[1]) as f:
+    for line in f:
+        try: entry = json.loads(line)
+        except: continue
+        if entry.get('type') not in ('user', 'assistant'): continue
+        msg = entry.get('message', {})
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            texts = []
+            for block in content:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    t = block['text']
+                    t = re.sub(r'<system-reminder>.*?</system-reminder>', '', t, flags=re.DOTALL).strip()
+                    if t: texts.append(t)
+            content = '\n'.join(texts)
+        elif isinstance(content, str):
+            content = re.sub(r'<system-reminder>.*?</system-reminder>', '', content, flags=re.DOTALL).strip()
+        if not content: continue
+        role = msg.get('role', entry.get('type',''))
+        parts.append(f'## {role}\n{content}\n')
+with open(sys.argv[2], 'w') as f: f.write('\n'.join(parts))
+" "$transcript" "$filtered"
+
+    if [ ! -s "$filtered" ]; then
+      rm -f "$lock_file" "$filtered"
+      exit 0
+    fi
+
+    if grep -qE '^SKIP_MEMORY_EXTRACTION$' "$filtered" 2>/dev/null; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Skipping — SKIP_MEMORY_EXTRACTION opt-out marker found in transcript" >> "$LOG"
+      rm -f "$lock_file" "$filtered"
+      exit 0
+    fi
+
+    filtered_size=$(wc -c < "$filtered" | tr -d ' ')
+    exchange_count=$(grep -c '^## user' "$filtered" || echo "0")
+    condensed=""
+    source_file="$filtered"
+    if [ "$exchange_count" -gt 20 ] && [ "$filtered_size" -gt 30000 ]; then
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Condensing transcript ($exchange_count exchanges, ${filtered_size}B) with Haiku..." >> "$LOG"
+      mkdir -p /tmp/claude
+      condensed="/tmp/claude/condensed-transcript-$$.md"
+      condensed_output=$(CLAUDE_CODE_SIMPLE=1 timeout 90 claude -p --model haiku --effort low --no-session-persistence \
+        --tools "" \
+        --disable-slash-commands \
+        --strict-mcp-config \
+        --settings '{"disableAllHooks":true}' \
+        --system-prompt "You condense session transcripts for memory extraction. Output a structured summary (3-5KB) that a separate AI will use to extract learnings. Preserve ALL of the following:
+- User corrections: moments where the human corrected Claude's wrong assumption or approach — HIGHEST PRIORITY, never omit
+- Technical discoveries: API quirks, data formats, byte layouts, unexpected behaviors
+- Debugging root causes: what the actual problem was, not just the fix
+- Environment gotchas: paths, platform quirks, build steps
+- Key decisions made and why
+- Failed approaches: what was tried and why it didn't work
+Skip: routine confirmations, file listings, boilerplate code not demonstrating a novel insight, repeated back-and-forth on the same topic. Use headers and bullet points. Be terse but complete." \
+        "$(cat "$filtered")" 2>&1) || condensed_output=""
+      if [ -n "$condensed_output" ] && [ ${#condensed_output} -gt 100 ]; then
+        echo "$condensed_output" > "$condensed"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Condensed: ${filtered_size}B → ${#condensed_output}B" >> "$LOG"
+        source_file="$condensed"
+      else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Condensation failed or timed out (${#condensed_output:-0}B) — using full filtered transcript" >> "$LOG"
+        condensed=""
+      fi
+    fi
+
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Extracting from ${transcript##*/} ($msg_count msgs, ${filtered_size}B filtered)" >> "$LOG"
+
+    existing_memory=""
+    if [ -f "$memory_file" ] && [ -s "$memory_file" ]; then
+      existing_memory=$(cat "$memory_file")
+    fi
+
+    existing_global=""
+    if [ -f "$GLOBAL_MEMORY" ] && [ -s "$GLOBAL_MEMORY" ]; then
+      existing_global=$(cat "$GLOBAL_MEMORY")
+    fi
+
+    cd "$project_cwd" 2>/dev/null || cd "$HOME"
+
+    output=$(CLAUDE_CODE_SIMPLE=1 claude -p --model sonnet --effort medium --no-session-persistence \
+      --tools "" \
+      --disable-slash-commands \
+      --strict-mcp-config \
+      --settings '{"disableAllHooks":true}' \
+      --system-prompt "You are a learning extraction agent. You output TWO files separated by a delimiter.
+
+## Output Format
+
+Output the updated project MEMORY.md first, then a delimiter, then the updated global memory:
+
+\`\`\`
+<project memory content>
+---GLOBAL_MEMORY_SEPARATOR---
+<global memory content>
+\`\`\`
+
+No preamble, no explanation, no markdown fences around the whole output. Just the two files with the separator between them.
+
+## What goes where — THIS IS CRITICAL
+
+**Project MEMORY.md** (default destination) — Almost everything goes here. API quirks, data formats, debugging insights, environment gotchas, patterns, tool-specific learnings. When in doubt, PUT IT IN PROJECT MEMORY.
+
+**Global memory** (rare, selective) — ONLY for patterns that are genuinely universal across many different project types. Think: a Docker gotcha that would bite anyone on any project, or a Claude Code behavioral quirk. NOT for project-ecosystem details like WordPress/WooCommerce, specific CRM APIs, or domain-specific tooling — those belong in the project where they were learned.
+
+**Test: Would a developer working on a COMPLETELY DIFFERENT kind of project (different language, different domain) benefit from this?** If no → project memory. If yes → maybe global, but keep it to one terse line.
+
+## Pin rules — IMPORTANT
+
+- NEVER add 📌 pins. Only the human or the in-session Claude instance adds pins.
+- When outputting existing pinned items, preserve them as-is.
+
+## What to extract
+- Technical discoveries: API quirks, data formats, byte layouts, coordinate conventions, protocol details
+- Debugging insights: root causes found, misleading symptoms, what worked vs what didn't
+- User corrections: places where the AI was wrong and the human corrected it
+- Environment gotchas: Docker issues, path conventions, build steps, platform-specific behavior
+- Patterns: approaches that worked well for recurring problems
+
+## What to skip
+- Routine code changes (added a function, fixed a typo)
+- Things obvious from reading the code
+- One-time tasks that won't recur
+- Implementation details already in the code itself
+- Anything already captured in existing memory (don't duplicate)
+
+## How to write
+- Organize by topic, not chronologically
+- Be specific and concrete (include exact values, paths, field names)
+- Replace outdated information with corrections
+- Keep project memory under 200 lines
+- Keep global memory VERY short — under 50 lines, only truly universal items
+- Global entries should be terse one-liners, not detailed explanations
+- If removing items from global that are project-specific, move them to project memory" \
+      "EXISTING PROJECT MEMORY.MD:
+${existing_memory:-<empty — this is a new file>}
+
+---
+
+EXISTING GLOBAL MEMORY:
+${existing_global:-<empty — this is a new file>}
+
+---
+
+SESSION TRANSCRIPT (filtered to user/assistant text only):
+$(cat "$source_file")
+
+---
+
+Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR---, then the complete updated global memory. Merge any new learnings from the transcript." 2>&1)
+
+    if [ -n "$output" ] && [ ${#output} -gt 50 ]; then
+      project_part=$(echo "$output" | sed -n '1,/---GLOBAL_MEMORY_SEPARATOR---/p' | sed '$d')
+      global_part=$(echo "$output" | sed -n '/---GLOBAL_MEMORY_SEPARATOR---/,$p' | sed '1d')
+
+      if [ -n "$project_part" ] && [ ${#project_part} -gt 50 ]; then
+        echo "$project_part" > "$memory_file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#project_part}B to $memory_file" >> "$LOG"
+      fi
+
+      if [ -n "$global_part" ] && [ ${#global_part} -gt 50 ]; then
+        mkdir -p "$(dirname "$GLOBAL_MEMORY")"
+        echo "$global_part" > "$GLOBAL_MEMORY"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#global_part}B to $GLOBAL_MEMORY" >> "$LOG"
+      fi
+    else
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] No output or too short (${#output:-0} bytes)" >> "$LOG"
+    fi
+
+    gc_counter_file="/tmp/claude/gc-counter-${encoded_path}"
+    if [ -n "$project_part" ] && [ ${#project_part} -gt 50 ]; then
+      count=0
+      [ -f "$gc_counter_file" ] && count=$(cat "$gc_counter_file" 2>/dev/null || echo "0")
+      count=$((count + 1))
+      echo "$count" > "$gc_counter_file"
+
+      if [ "$count" -ge 10 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] [GC] Triggering GC after $count extractions" >> "$LOG"
+        echo "0" > "$gc_counter_file"
+        CLAUDE_PROJECT_DIR="$project_cwd" bash "${GC_SCRIPT}"
+      fi
+    fi
+
+    rm -f "$lock_file" "$filtered"
+    [ -n "$condensed" ] && rm -f "$condensed"
+  ) >>/tmp/claude/extract-learnings.log 2>&1 &
+  disown
+
+  echo "Extraction launched in background. Check: claude-memory log" >&2
+}
+
+# Main dispatch
+case "${1:-}" in
+  show)    shift; cmd_show "$@" ;;
+  search)
+    shift
+    if [ $# -lt 1 ]; then
+      echo "Usage: claude-memory search <query> [--all]"
+      exit 1
+    fi
+    cmd_search "$@"
+    ;;
+  log)     shift; cmd_log "$@" ;;
+  stats)   cmd_stats ;;
+  extract) shift; cmd_extract "$@" ;;
+  gc)
+    shift
+    echo "Running memory GC (Opus)..."
+    CLAUDE_PROJECT_DIR="$(pwd)" bash "${GC_SCRIPT}" "$@"
+    if echo "$@" | grep -q -- "--dry-run"; then
+      : # dry-run output handled by gc-memory.sh
+    else
+      echo "GC complete. Check: claude-memory log"
+    fi
+    ;;
+  help|-h|--help) usage ;;
+  "")      usage ;;
+  *)
+    echo "Unknown command: $1"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
