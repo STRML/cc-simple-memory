@@ -16,8 +16,8 @@ Every 10th extraction → gc-memory.sh → Opus consolidates + archives stale en
 ### 1. Install the plugin
 
 ```bash
-/plugin marketplace add /path/to/cc-simple-memory
-/plugin install cc-simple-memory@cc-simple-memory-dev
+/plugin marketplace add STRML/cc-simple-memory
+/plugin install cc-simple-memory
 ```
 
 Restart Claude Code.
