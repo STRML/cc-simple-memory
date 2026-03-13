@@ -550,18 +550,22 @@ No preamble, no explanation, no markdown fences around the whole output. Just th
 - When outputting existing pinned items, preserve them as-is.
 
 ## What to extract
-- Technical discoveries: API quirks, data formats, byte layouts, coordinate conventions, protocol details
-- Debugging insights: root causes found, misleading symptoms, what worked vs what didn't
-- User corrections: places where the AI was wrong and the human corrected it
-- Environment gotchas: Docker issues, path conventions, build steps, platform-specific behavior
-- Patterns: approaches that worked well for recurring problems
+- Technical discoveries: API quirks, data formats, byte layouts, coordinate conventions, protocol details — things that SURPRISED you or caused a bug
+- Debugging insights: root causes found, misleading symptoms, what worked vs what didn't — must have taken real effort to diagnose
+- User corrections: places where the AI was wrong and the human corrected it — HIGHEST PRIORITY
+- Environment gotchas: broken tooling, unexpected platform behavior, non-obvious setup requirements
+- User preferences and rules: explicit instructions about how the user wants things done
+- Patterns: approaches that worked well for recurring problems in this codebase
 
-## What to skip
+## What to skip — BE STRICT
 - Routine code changes (added a function, fixed a typo)
 - Things obvious from reading the code
 - One-time tasks that won't recur
 - Implementation details already in the code itself
 - Anything already captured in existing memory (don't duplicate)
+- **Q&A content**: if the session was Claude answering the user's questions about a tool/technology (LM Studio settings, how MLX works, model comparisons, CLI usage) — SKIP IT. That's documentation, not a discovery.
+- **Tutorial/reference content**: "how X works", product comparisons, feature lists, tool overviews — these have official docs; don't summarize them into memory
+- **Smell test**: ask "Would this save me from a real mistake, or is it just documentation?" If just documentation → skip it.
 
 ## How to write
 - Organize by topic, not chronologically
