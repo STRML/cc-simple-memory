@@ -168,6 +168,7 @@ If no items were pruned from a section, output (empty) after that separator.
 - Patterns that apply repeatedly in this codebase
 - Debugging insights specific to this project's stack
 - Any 📌 item (unconditionally in project memory)
+- The \`## Decisions\` section — keep the 3-5 most recent/relevant decisions. Older decisions can be removed from MEMORY.md (they live in the append-only decision log). Always preserve the pinned line: \`📌 Full decision log: memory/DECISIONS.md\`
 
 ## How to consolidate
 

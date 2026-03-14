@@ -56,6 +56,7 @@ USAGE:
 
 COMMANDS:
   show [project|global|archive|all]  Display memory files (default: all)
+  decisions                   Show the project decision log
   search <query> [--all]      Search transcripts for a concept
   log [N]                     Show last N lines of extraction log (default: 30)
   stats                       Show memory system statistics
@@ -145,6 +146,20 @@ cmd_show() {
       exit 1
       ;;
   esac
+}
+
+cmd_decisions() {
+  local project_mem=$(project_memory_path)
+  local decisions_file="${project_mem%MEMORY.md}DECISIONS.md"
+
+  if [ -f "$decisions_file" ]; then
+    echo "=== Decision Log: $decisions_file ==="
+    echo ""
+    cat "$decisions_file"
+  else
+    echo "No decision log found for $(pwd)"
+    echo "Decisions are logged automatically during extraction when architectural/design choices are detected."
+  fi
 }
 
 cmd_search() {
@@ -522,23 +537,34 @@ Skip: routine confirmations, file listings, boilerplate code not demonstrating a
       --disable-slash-commands \
       --strict-mcp-config \
       --settings '{"disableAllHooks":true}' \
-      --system-prompt "You are a learning extraction agent. You output TWO files separated by a delimiter.
+      --system-prompt "You are a learning extraction agent. You output THREE sections separated by delimiters.
 
 ## Output Format
 
-Output the updated project MEMORY.md first, then a delimiter, then the updated global memory:
+Output the updated project MEMORY.md first, then global memory, then any new decision log entries:
 
 \`\`\`
 <project memory content>
 ---GLOBAL_MEMORY_SEPARATOR---
 <global memory content>
+---DECISIONS_SEPARATOR---
+<new decision entries to append, or (none) if no decisions were made>
 \`\`\`
 
-No preamble, no explanation, no markdown fences around the whole output. Just the two files with the separator between them.
+No preamble, no explanation, no markdown fences around the whole output. Just the three sections with separators between them.
 
 ## What goes where — THIS IS CRITICAL
 
-**Project MEMORY.md** (default destination) — Almost everything goes here. API quirks, data formats, debugging insights, environment gotchas, patterns, tool-specific learnings. When in doubt, PUT IT IN PROJECT MEMORY.
+**Project MEMORY.md** (default destination) — Almost everything goes here. API quirks, data formats, debugging insights, environment gotchas, patterns, tool-specific learnings. When in doubt, PUT IT IN PROJECT MEMORY. Include a \`## Decisions\` section with the 3-5 most recent/relevant decisions (one-liner each). Always include this pinned line in the Decisions section: \`📌 Full decision log: memory/DECISIONS.md\`
+
+**Decision log entries** (third output section) — When the session contains a significant architectural, design, or technology choice, output it as a new entry. Format each entry as:
+\`\`\`
+## YYYY-MM-DD: <short decision title>
+- **Choice:** what was decided
+- **Alternatives:** what else was considered
+- **Why:** the reasoning
+\`\`\`
+Output \`(none)\` if no decisions were made in this session. Only log genuine choices between alternatives — not routine implementation details.
 
 **Global memory** (rare, selective) — ONLY for patterns that are genuinely universal across many different project types. Think: a Docker gotcha that would bite anyone on any project, or a Claude Code behavioral quirk. NOT for project-ecosystem details like WordPress/WooCommerce, specific CRM APIs, or domain-specific tooling — those belong in the project where they were learned.
 
@@ -556,6 +582,7 @@ No preamble, no explanation, no markdown fences around the whole output. Just th
 - Environment gotchas: broken tooling, unexpected platform behavior, non-obvious setup requirements
 - User preferences and rules: explicit instructions about how the user wants things done
 - Patterns: approaches that worked well for recurring problems in this codebase
+- **Decisions**: architectural, design, or technology choices where alternatives were considered — these go BOTH in the ## Decisions section of MEMORY.md (recent 3-5 only) AND as new entries in the decisions output section
 
 ## What to skip — BE STRICT
 - Routine code changes (added a function, fixed a typo)
@@ -593,8 +620,17 @@ $(cat "$source_file")
 Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR---, then the complete updated global memory. Merge any new learnings from the transcript." 2>&1)
 
     if [ -n "$output" ] && [ ${#output} -gt 50 ]; then
+      # Split into 3 sections: project memory, global memory, decisions
       project_part=$(echo "$output" | sed -n '1,/---GLOBAL_MEMORY_SEPARATOR---/p' | sed '$d')
-      global_part=$(echo "$output" | sed -n '/---GLOBAL_MEMORY_SEPARATOR---/,$p' | sed '1d')
+      rest_after_global=$(echo "$output" | sed -n '/---GLOBAL_MEMORY_SEPARATOR---/,$p' | sed '1d')
+      global_part=$(echo "$rest_after_global" | sed -n '1,/---DECISIONS_SEPARATOR---/p' | sed '$d')
+      decisions_part=$(echo "$rest_after_global" | sed -n '/---DECISIONS_SEPARATOR---/,$p' | sed '1d')
+
+      # Fall back if no DECISIONS_SEPARATOR found (backward compat)
+      if [ -z "$global_part" ]; then
+        global_part="$rest_after_global"
+        decisions_part=""
+      fi
 
       if [ -n "$project_part" ] && [ ${#project_part} -gt 50 ]; then
         echo "$project_part" > "$memory_file"
@@ -605,6 +641,24 @@ Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR--
         mkdir -p "$(dirname "$GLOBAL_MEMORY")"
         echo "$global_part" > "$GLOBAL_MEMORY"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#global_part}B to $GLOBAL_MEMORY" >> "$LOG"
+      fi
+
+      # Append new decisions to the decision log (append-only, never overwritten)
+      decisions_trimmed=$(echo "$decisions_part" | sed '/^[[:space:]]*$/d' | grep -vi '(none)' || true)
+      if [ -n "$decisions_trimmed" ] && [ ${#decisions_trimmed} -gt 10 ]; then
+        decisions_file="${memory_dir}/DECISIONS.md"
+        if [ ! -f "$decisions_file" ]; then
+          echo "# Decision Log" > "$decisions_file"
+          echo "" >> "$decisions_file"
+          echo "Append-only log of architectural, design, and technology decisions." >> "$decisions_file"
+          echo "Most recent/relevant decisions are also in MEMORY.md \`## Decisions\`." >> "$decisions_file"
+          echo "" >> "$decisions_file"
+        fi
+        {
+          echo ""
+          echo "$decisions_trimmed"
+        } >> "$decisions_file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Appended ${#decisions_trimmed}B to $decisions_file" >> "$LOG"
       fi
     else
       echo "[$(date '+%Y-%m-%d %H:%M:%S')] No output or too short (${#output:-0} bytes)" >> "$LOG"
@@ -634,7 +688,8 @@ Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR--
 
 # Main dispatch
 case "${1:-}" in
-  show)    shift; cmd_show "$@" ;;
+  show)      shift; cmd_show "$@" ;;
+  decisions) cmd_decisions ;;
   search)
     shift
     if [ $# -lt 1 ]; then
