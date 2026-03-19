@@ -6,31 +6,21 @@ description: Check cc-simple-memory setup status and guide post-install configur
 
 Check the current setup status of the cc-simple-memory plugin and guide the user through any remaining post-install steps.
 
-## Steps
+## Current Status
 
-1. Read `~/.claude/settings.json` and check whether the following permissions are present in `permissions.allow`:
-   - `Read(~/.claude/projects/**/memory/*)`
-   - `Edit(~/.claude/projects/**/memory/*)`
-   - `Write(~/.claude/projects/**/memory/*)`
-   - `Read(~/.claude/rules/*)`
-   - `Edit(~/.claude/rules/*)`
-   - `Write(~/.claude/rules/*)`
-   - `Read(~/.claude/memory/*)`
-   - `Edit(~/.claude/memory/*)`
-   - `Write(~/.claude/memory/*)`
+!`bash -c 'settings="$HOME/.claude/settings.json"; perms=""; if [ -f "$settings" ]; then perms=$(cat "$settings"); fi; echo "### Permissions"; for p in "Read(~/.claude/projects/**/memory/*)" "Edit(~/.claude/projects/**/memory/*)" "Write(~/.claude/projects/**/memory/*)" "Read(~/.claude/rules/*)" "Edit(~/.claude/rules/*)" "Write(~/.claude/rules/*)" "Read(~/.claude/memory/*)" "Edit(~/.claude/memory/*)" "Write(~/.claude/memory/*)"; do if echo "$perms" | grep -qF "$p"; then echo "- ✅ $p"; else echo "- ❌ $p"; fi; done; echo ""; echo "### CLI Symlink"; found=0; for loc in "$HOME/bin/claude-memory" "$HOME/.local/bin/claude-memory"; do if [ -L "$loc" ]; then echo "- ✅ $loc -> $(readlink "$loc")"; found=1; elif [ -x "$loc" ]; then echo "- ✅ $loc (exists, not a symlink)"; found=1; fi; done; [ "$found" -eq 0 ] && echo "- ❌ No symlink found at ~/bin/ or ~/.local/bin/"; if [ -f "$HOME/.claude/cc-simple-memory-state.json" ]; then echo ""; echo "### State"; cat "$HOME/.claude/cc-simple-memory-state.json"; fi'`
 
-2. Check whether `~/bin/claude-memory` OR `~/.local/bin/claude-memory` exists and is a symlink. Also read `~/.claude/cc-simple-memory-state.json` if it exists to see which location was chosen by setup.sh.
+## Instructions
 
-3. Report status clearly:
-   - ✅ for items already configured
-   - ❌ for items missing
+Review the status above and report it to the user.
 
-4. If anything is missing, tell the user to run the setup script in their terminal:
+- If everything shows ✅, tell the user the plugin is fully configured.
+- If anything shows ❌, tell the user to run setup in their terminal:
 
    ```bash
    bash "${CLAUDE_PLUGIN_ROOT}/bin/setup.sh"
    ```
 
-   Substitute the actual `${CLAUDE_PLUGIN_ROOT}` path (find it by checking where the plugin is installed: `ls ~/.claude/plugins/cache/`).
+   The plugin is installed at: !`echo "${CLAUDE_PLUGIN_ROOT}"`
 
-5. After they confirm they've run it, verify the permissions are now present in settings.json and report the final status.
+- After they confirm they've run it, invoke `/memory-setup` again to verify.

@@ -82,6 +82,10 @@ Check with: `grep -qE '^SKIP_MEMORY_EXTRACTION$'`
 Triggers when `grep -c '^## user'` > 20 AND filtered size > 30000 bytes.
 Uses Haiku with `timeout 90`. `mkdir -p /tmp/claude` before temp file creation.
 
+## Current Memory Stats
+
+!`claude-memory stats 2>/dev/null || echo "(claude-memory not on PATH — run /memory-setup)"`
+
 ## MEMORY.md Guidelines
 
 - Organize by topic, not chronologically
