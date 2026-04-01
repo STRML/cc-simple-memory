@@ -6,7 +6,7 @@
     {
       "name": "cc-simple-memory",
       "description": "Persistent cross-session memory for Claude Code",
-      "version": "1.1.1",
+      "version": "1.2.0",
       "source": "./",
       "author": { "name": "samuelreed" }
     }
