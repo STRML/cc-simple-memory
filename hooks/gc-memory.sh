@@ -99,6 +99,18 @@ output=$(CLAUDE_CODE_SIMPLE=1 claude -p --model opus --effort low --no-session-p
   --settings '{"disableAllHooks":true}' \
   --system-prompt "You are a memory curator. You CONSOLIDATE, PRUNE, and PROMOTE.
 
+## MEMORY.md FORMAT — INDEX-FIRST PATTERN (CRITICAL)
+
+MEMORY.md is an INDEX, not a content dump. It is always loaded into Claude's context window.
+
+**Topic file links** like \`- [Title](filename.md) — summary\` point to separate files on disk. You MUST:
+- PRESERVE all topic file links exactly (filename, title, summary)
+- NEVER inline the content of a linked topic file
+- You may update the summary text after \`—\` if it's stale
+- You may archive a topic file link if the content is clearly obsolete (but archive the link, not the file content)
+
+**Inline entries** (no link) can be consolidated, pruned, or archived normally.
+
 ## Rules
 
 ### Project memory pins
@@ -135,6 +147,7 @@ If no items were pruned from a section, output (empty) after that separator.
 - Global memory: ≤50 lines (hard cap: 80). This is a SMALL file — be ruthless.
 - In PROJECT memory, 📌 items don't count toward targets.
 - In GLOBAL memory, 📌 items DO count toward the 50-line target. Remove pins from project-specific items.
+- Topic file links are compact (1 line each) and count toward line targets, but prefer keeping them over inline content.
 
 ## What to PRUNE from global (move to archive)
 
@@ -160,9 +173,11 @@ If no items were pruned from a section, output (empty) after that separator.
 - Stale information about changed code
 - Duplicates of what's already in global
 - Obvious patterns
+- Verbose inline content that could be one line (consolidate it)
 
 ## What to KEEP in project memory
 
+- ALL topic file links \`[Title](file.md)\` — these are compact pointers, always preserve
 - Genuinely surprising gotchas for this specific project
 - API quirks, data format details, environment setup
 - Patterns that apply repeatedly in this codebase
@@ -173,9 +188,11 @@ If no items were pruned from a section, output (empty) after that separator.
 ## How to consolidate
 
 - Merge related entries under shared headers
-- Compress verbose explanations into terse, actionable notes
+- Compress verbose inline content into terse one-liners (~150 chars)
+- Multi-line inline content that can't be compressed → mark with \`(→ topic file)\` for later migration
 - Remove examples when the rule is self-explanatory
-- Prefer 'Do X' over 'When Y happens, you should do X because Z'" \
+- Prefer 'Do X' over 'When Y happens, you should do X because Z'
+- NEVER expand topic file links into inline content — that's the opposite of consolidation" \
   "PROJECT MEMORY.MD (${memory_lines} lines — target ≤150):
 ${existing_memory:-<empty>}
 

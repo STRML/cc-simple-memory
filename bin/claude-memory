@@ -553,9 +553,28 @@ Output the updated project MEMORY.md first, then global memory, then any new dec
 
 No preamble, no explanation, no markdown fences around the whole output. Just the three sections with separators between them.
 
+## MEMORY.md FORMAT — INDEX-FIRST PATTERN (CRITICAL)
+
+MEMORY.md is an INDEX, not a dump. It is always loaded into Claude's context window, so it must be compact.
+
+**If the existing MEMORY.md contains links to topic files** like \`[Title](filename.md)\`, you MUST preserve those links exactly. Do NOT inline the content of linked topic files back into MEMORY.md. The topic files exist on disk and are read on-demand — flattening them wastes context.
+
+**Format for MEMORY.md entries:**
+- Topic file pointer: \`- [Short Title](filename.md) — one-line summary under 150 chars\`
+- Inline entry (no topic file): \`- Terse fact or rule — keep to one line\`
+
+**When to use which:**
+- If content needs multiple lines of explanation → it belongs in a topic file (but you cannot create files — leave it inline and mark with \`(→ topic file)\` so the in-session Claude migrates it)
+- If content fits in one terse line → inline is fine
+- Existing topic file links → ALWAYS preserve as links, never inline
+
+**Section headers** (use as needed): \`## Feedback\`, \`## Key Facts\`, \`## Solutions\`, \`## Architecture\`, \`## Active Projects\`, \`## Decisions\`
+
+Include a \`## Decisions\` section with the 3-5 most recent/relevant decisions (one-liner each). Always include this pinned line in the Decisions section: \`📌 Full decision log: memory/DECISIONS.md\`
+
 ## What goes where — THIS IS CRITICAL
 
-**Project MEMORY.md** (default destination) — Almost everything goes here. API quirks, data formats, debugging insights, environment gotchas, patterns, tool-specific learnings. When in doubt, PUT IT IN PROJECT MEMORY. Include a \`## Decisions\` section with the 3-5 most recent/relevant decisions (one-liner each). Always include this pinned line in the Decisions section: \`📌 Full decision log: memory/DECISIONS.md\`
+**Project MEMORY.md** (default destination) — Almost everything goes here. API quirks, data formats, debugging insights, environment gotchas, patterns, tool-specific learnings. When in doubt, PUT IT IN PROJECT MEMORY.
 
 **Decision log entries** (third output section) — When the session contains a significant architectural, design, or technology choice, output it as a new entry. Format each entry as:
 \`\`\`
@@ -590,12 +609,16 @@ Output \`(none)\` if no decisions were made in this session. Only log genuine ch
 - One-time tasks that won't recur
 - Implementation details already in the code itself
 - Anything already captured in existing memory (don't duplicate)
+- **Content of topic files** — if MEMORY.md has \`[Title](file.md)\`, do NOT read/inline the file content. Preserve the link.
 - **Q&A content**: if the session was Claude answering the user's questions about a tool/technology (LM Studio settings, how MLX works, model comparisons, CLI usage) — SKIP IT. That's documentation, not a discovery.
 - **Tutorial/reference content**: "how X works", product comparisons, feature lists, tool overviews — these have official docs; don't summarize them into memory
 - **Smell test**: ask "Would this save me from a real mistake, or is it just documentation?" If just documentation → skip it.
 
 ## How to write
-- Organize by topic, not chronologically
+- MEMORY.md is an INDEX — keep entries to one line each (~150 chars max)
+- Multi-line content should be marked \`(→ topic file)\` for later migration
+- Preserve all existing \`[Title](file.md)\` links unchanged
+- Organize by topic with section headers, not chronologically
 - Be specific and concrete (include exact values, paths, field names)
 - Replace outdated information with corrections
 - Keep project memory under 200 lines

@@ -86,10 +86,20 @@ Uses Haiku with `timeout 90`. `mkdir -p /tmp/claude` before temp file creation.
 
 !`claude-memory stats 2>/dev/null || echo "(claude-memory not on PATH — run /memory-setup)"`
 
-## MEMORY.md Guidelines
+## MEMORY.md Format — Index-First Pattern
 
-- Organize by topic, not chronologically
+MEMORY.md is an **index**, not a content dump. It is always loaded into context.
+
+**Entry types:**
+- Topic file pointer: `- [Short Title](filename.md) — one-line summary` (~150 chars max)
+- Inline entry: `- Terse fact or rule` (one line, no topic file needed)
+- Section headers: `## Feedback`, `## Key Facts`, `## Solutions`, `## Architecture`, `## Active Projects`, `## Decisions`
+
+**Rules:**
 - Keep under 200 lines — lines after 200 are truncated in context
 - Prefix critical entries with 📌 (GC never prunes pinned items)
 - Replace outdated info rather than appending
+- Multi-line content belongs in a topic file (with frontmatter: name, description, type)
+- Mark inline content that needs migration: `(→ topic file)`
 - Project memory is for YOU (future Claude), not the human
+- NEVER inline topic file content back into MEMORY.md — preserve links
