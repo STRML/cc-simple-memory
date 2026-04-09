@@ -90,6 +90,41 @@ if [ "$dry_run" = true ]; then
   echo ""
 fi
 
+# Dedup helper: filters out lines that already exist in an archive file
+dedup_against_archive() {
+  local new_content="$1"
+  local archive_file="$2"
+
+  if [ ! -f "$archive_file" ] || [ ! -s "$archive_file" ]; then
+    echo "$new_content"
+    return
+  fi
+
+  local result=""
+  while IFS= read -r line; do
+    # Keep empty lines and section headers
+    if [ -z "$line" ] || [[ "$line" == "##"* ]] || [[ "$line" == "###"* ]]; then
+      result+="$line"$'\n'
+      continue
+    fi
+    # Normalize: strip leading/trailing whitespace and list markers
+    local normalized
+    normalized=$(echo "$line" | sed 's/^[[:space:]]*[-*]*[[:space:]]*//' | sed 's/[[:space:]]*$//')
+    # Skip if too short to meaningfully match
+    if [ ${#normalized} -lt 15 ]; then
+      result+="$line"$'\n'
+      continue
+    fi
+    # Check if this content already exists in archive
+    if ! grep -qF "$normalized" "$archive_file" 2>/dev/null; then
+      result+="$line"$'\n'
+    fi
+  done <<< "$new_content"
+
+  # Remove trailing newline
+  echo "${result%$'\n'}"
+}
+
 cd "$project_dir" 2>/dev/null || cd "$HOME"
 
 output=$(CLAUDE_CODE_SIMPLE=1 claude -p --model opus --effort low --no-session-persistence \
@@ -175,6 +210,10 @@ If no items were pruned from a section, output (empty) after that separator.
 - Obvious patterns
 - Verbose inline content that could be one line (consolidate it)
 
+### Archive deduplication
+- Do NOT include items in the archive output that already appear in the archive input. The archive is append-only — re-archiving duplicates wastes space.
+- If an item in active memory duplicates something already archived, remove it from active memory WITHOUT adding it to the archive output sections.
+
 ## What to KEEP in project memory
 
 - ALL topic file links \`[Title](file.md)\` — these are compact pointers, always preserve
@@ -252,32 +291,46 @@ if [ -n "$output" ] && [ ${#output} -gt 50 ]; then
     echo "[$timestamp] [GC] Global memory: ${global_lines} → ${new_lines} lines" >> "$LOG"
   fi
 
-  # Append newly archived project items
+  # Append newly archived project items (deduped against existing archive)
   project_archive_trimmed=$(echo "$project_archive_new" | sed '/^[[:space:]]*$/d' | grep -vi '(empty)' || true)
   if [ -n "$project_archive_trimmed" ] && [ ${#project_archive_trimmed} -gt 10 ]; then
-    mkdir -p "$(dirname "$archive_file")"
-    {
-      echo ""
-      echo "## Archived ${timestamp}"
-      echo ""
-      echo "$project_archive_trimmed"
-    } >> "$archive_file"
-    new_archive_lines=$(echo "$project_archive_trimmed" | wc -l | tr -d ' ')
-    echo "[$timestamp] [GC] Archived ${new_archive_lines} lines to project archive" >> "$LOG"
+    project_archive_trimmed=$(dedup_against_archive "$project_archive_trimmed" "$archive_file")
+    # Re-check after dedup — may have removed everything
+    project_archive_trimmed=$(echo "$project_archive_trimmed" | sed '/^[[:space:]]*$/d')
+    if [ -n "$project_archive_trimmed" ] && [ ${#project_archive_trimmed} -gt 10 ]; then
+      mkdir -p "$(dirname "$archive_file")"
+      {
+        echo ""
+        echo "## Archived ${timestamp}"
+        echo ""
+        echo "$project_archive_trimmed"
+      } >> "$archive_file"
+      new_archive_lines=$(echo "$project_archive_trimmed" | wc -l | tr -d ' ')
+      echo "[$timestamp] [GC] Archived ${new_archive_lines} lines to project archive" >> "$LOG"
+    else
+      echo "[$timestamp] [GC] All project archive items were duplicates — skipped" >> "$LOG"
+    fi
   fi
 
-  # Append newly archived global items
+  # Append newly archived global items (deduped against existing archive)
   global_archive_trimmed=$(echo "$global_archive_new" | sed '/^[[:space:]]*$/d' | grep -vi '(empty)' || true)
   if [ -n "$global_archive_trimmed" ] && [ ${#global_archive_trimmed} -gt 10 ]; then
-    mkdir -p "$(dirname "$global_archive_file")"
-    {
-      echo ""
-      echo "## Archived ${timestamp}"
-      echo ""
-      echo "$global_archive_trimmed"
-    } >> "$global_archive_file"
-    new_archive_lines=$(echo "$global_archive_trimmed" | wc -l | tr -d ' ')
-    echo "[$timestamp] [GC] Archived ${new_archive_lines} lines to global archive" >> "$LOG"
+    global_archive_trimmed=$(dedup_against_archive "$global_archive_trimmed" "$global_archive_file")
+    # Re-check after dedup — may have removed everything
+    global_archive_trimmed=$(echo "$global_archive_trimmed" | sed '/^[[:space:]]*$/d')
+    if [ -n "$global_archive_trimmed" ] && [ ${#global_archive_trimmed} -gt 10 ]; then
+      mkdir -p "$(dirname "$global_archive_file")"
+      {
+        echo ""
+        echo "## Archived ${timestamp}"
+        echo ""
+        echo "$global_archive_trimmed"
+      } >> "$global_archive_file"
+      new_archive_lines=$(echo "$global_archive_trimmed" | wc -l | tr -d ' ')
+      echo "[$timestamp] [GC] Archived ${new_archive_lines} lines to global archive" >> "$LOG"
+    else
+      echo "[$timestamp] [GC] All global archive items were duplicates — skipped" >> "$LOG"
+    fi
   fi
 else
   echo "[$timestamp] [GC] Failed — no output or too short (${#output:-0} bytes)" >> "$LOG"

@@ -62,6 +62,7 @@ COMMANDS:
   stats                       Show memory system statistics
   extract [--dry-run]         Manually trigger extraction for current project
   gc [--dry-run]              Garbage-collect memory files (prune stale/redundant entries)
+  compact-archive [project|global|all]  Deduplicate an existing archive file (default: all)
 
 EXAMPLES:
   claude-memory show                    # Show both project + global active memory
@@ -74,6 +75,8 @@ EXAMPLES:
   claude-memory extract --dry-run       # Preview what extraction would find
   claude-memory gc                      # Run Opus GC on oversized memory files
   claude-memory gc --dry-run            # Preview GC output without writing
+  claude-memory compact-archive         # Deduplicate all archive files
+  claude-memory compact-archive global  # Deduplicate global archive only
 
 PATHS:
   Project memory:   ~/.claude/projects/<encoded-path>/memory/MEMORY.md
@@ -530,6 +533,19 @@ Skip: routine confirmations, file listings, boilerplate code not demonstrating a
       existing_global=$(cat "$GLOBAL_MEMORY")
     fi
 
+    # Read recent archive entries so Sonnet knows what was intentionally pruned
+    GLOBAL_ARCHIVE="${CLAUDE_DIR}/memory/global-archive.md"
+    recent_global_archive=""
+    if [ -f "$GLOBAL_ARCHIVE" ] && [ -s "$GLOBAL_ARCHIVE" ]; then
+      recent_global_archive=$(tail -30 "$GLOBAL_ARCHIVE")
+    fi
+
+    project_archive_file="${memory_dir}/ARCHIVE.md"
+    recent_project_archive=""
+    if [ -f "$project_archive_file" ] && [ -s "$project_archive_file" ]; then
+      recent_project_archive=$(tail -30 "$project_archive_file")
+    fi
+
     cd "$project_cwd" 2>/dev/null || cd "$HOME"
 
     output=$(CLAUDE_CODE_SIMPLE=1 claude -p --model sonnet --effort medium --no-session-persistence \
@@ -635,6 +651,16 @@ ${existing_global:-<empty — this is a new file>}
 
 ---
 
+RECENTLY ARCHIVED FROM PROJECT (these were intentionally pruned by GC — do NOT re-add):
+${recent_project_archive:-<none>}
+
+---
+
+RECENTLY ARCHIVED FROM GLOBAL (these were intentionally pruned by GC — do NOT re-add):
+${recent_global_archive:-<none>}
+
+---
+
 SESSION TRANSCRIPT (filtered to user/assistant text only):
 $(cat "$source_file")
 
@@ -709,6 +735,53 @@ Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR--
   echo "Extraction launched in background. Check: claude-memory log" >&2
 }
 
+cmd_compact_archive() {
+  local target="${1:-all}"
+  local project_mem=$(project_memory_path)
+  local project_archive="${project_mem%MEMORY.md}ARCHIVE.md"
+  local global_archive="${CLAUDE_DIR}/memory/global-archive.md"
+
+  local archives=()
+  case "$target" in
+    project) archives=("$project_archive") ;;
+    global)  archives=("$global_archive") ;;
+    all)     archives=("$project_archive" "$global_archive") ;;
+    *)
+      echo "Unknown target: $target (use project, global, or all)"
+      exit 1
+      ;;
+  esac
+
+  for archive_path in "${archives[@]}"; do
+    if [ ! -f "$archive_path" ] || [ ! -s "$archive_path" ]; then
+      echo "Skipping $archive_path (not found or empty)"
+      continue
+    fi
+
+    local before_lines=$(wc -l < "$archive_path" | tr -d ' ')
+
+    # Use awk to deduplicate: track seen content lines, preserve headers and structure
+    awk '
+    /^## Archived/ { print; next }
+    /^$/ { print; next }
+    /^###/ { print; next }
+    {
+      # Normalize: strip leading whitespace and list markers
+      line = $0
+      gsub(/^[[:space:]]*[-*]*[[:space:]]*/, "", line)
+      gsub(/[[:space:]]*$/, "", line)
+      if (length(line) < 15 || !seen[line]++) {
+        print $0
+      }
+    }
+    ' "$archive_path" > "${archive_path}.tmp"
+
+    mv "${archive_path}.tmp" "$archive_path"
+    local after_lines=$(wc -l < "$archive_path" | tr -d ' ')
+    echo "Compacted $archive_path: $before_lines -> $after_lines lines (removed $((before_lines - after_lines)) duplicates)"
+  done
+}
+
 # Main dispatch
 case "${1:-}" in
   show)      shift; cmd_show "$@" ;;
@@ -734,6 +807,7 @@ case "${1:-}" in
       echo "GC complete. Check: claude-memory log"
     fi
     ;;
+  compact-archive) shift; cmd_compact_archive "$@" ;;
   help|-h|--help) usage ;;
   "")      usage ;;
   *)
