@@ -51,6 +51,7 @@ claude-memory log                   # Recent extraction log
 claude-memory search "query"        # Search project transcripts
 claude-memory extract --dry-run     # Preview what extraction would find
 claude-memory gc --dry-run          # Preview GC without writing
+claude-memory compact-archive         # Deduplicate bloated archive files
 claude-memory show archive          # View cold storage
 ```
 
