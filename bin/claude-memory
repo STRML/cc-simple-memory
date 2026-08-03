@@ -681,15 +681,34 @@ Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR--
         decisions_part=""
       fi
 
+      # A section that is only a "no content" placeholder must not replace
+      # existing memory: the agent emits one when the session had nothing
+      # meaningful, and overwriting with it would destroy the real index.
+      # (None), "no session content", and "no extractable content" are the
+      # forms it actually uses.
+      is_placeholder() {
+        echo "$1" | grep -qiE '(^|[[:space:]])\(?(none|no (session|project|global|meaningful).*content|no extractable.*|no (project|global) memory|no (new |learnings|updates)|nothing (to |new )?extract)\)?' || \
+        { echo "$1" | grep -qiE '^##[[:space:]]+(Feedback|Key Facts|Architecture|Active Projects|Decisions)[[:space:]]*$' && \
+          [ "$(echo "$1" | grep -cE '^\-' )" -eq 0 ]; }
+      }
+
       if [ -n "$project_part" ] && [ ${#project_part} -gt 50 ]; then
-        echo "$project_part" > "$memory_file"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#project_part}B to $memory_file" >> "$LOG"
+        if is_placeholder "$project_part" && [ -n "$existing_memory" ]; then
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Kept existing $memory_file (agent returned a no-content placeholder)" >> "$LOG"
+        else
+          echo "$project_part" > "$memory_file"
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#project_part}B to $memory_file" >> "$LOG"
+        fi
       fi
 
       if [ -n "$global_part" ] && [ ${#global_part} -gt 50 ]; then
-        mkdir -p "$(dirname "$GLOBAL_MEMORY")"
-        echo "$global_part" > "$GLOBAL_MEMORY"
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#global_part}B to $GLOBAL_MEMORY" >> "$LOG"
+        if is_placeholder "$global_part" && [ -n "$existing_global" ]; then
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Kept existing $GLOBAL_MEMORY (agent returned a no-content placeholder)" >> "$LOG"
+        else
+          mkdir -p "$(dirname "$GLOBAL_MEMORY")"
+          echo "$global_part" > "$GLOBAL_MEMORY"
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] Wrote ${#global_part}B to $GLOBAL_MEMORY" >> "$LOG"
+        fi
       fi
 
       # Append new decisions to the decision log (append-only, never overwritten)
