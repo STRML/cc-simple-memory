@@ -1,6 +1,6 @@
 {
   "name": "cc-simple-memory",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Persistent cross-session memory for Claude Code. Hooks extract learnings automatically; Sonnet + Opus maintain MEMORY.md files per project and globally.",
   "author": {
     "name": "samuelreed",
