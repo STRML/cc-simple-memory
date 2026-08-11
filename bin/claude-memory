@@ -684,12 +684,26 @@ Output the complete updated project MEMORY.md, then ---GLOBAL_MEMORY_SEPARATOR--
       # A section that is only a "no content" placeholder must not replace
       # existing memory: the agent emits one when the session had nothing
       # meaningful, and overwriting with it would destroy the real index.
-      # (None), "no session content", and "no extractable content" are the
-      # forms it actually uses.
+      #
+      # Two shapes get through, and the guard needs a test for each.
+      #
+      # (a) An explicit "nothing to extract" placeholder. The leading boundary
+      #     is any non-alphanumeric character, NOT whitespace only — markdown
+      #     wrappers such as `_(No session content to extract ...)_` failed a
+      #     whitespace anchor and clobbered two real indexes on 2026-08-07.
+      # (b) A conversational reply addressed to the human ("I don't see any
+      #     session content", "please paste the transcript"). The agent writes
+      #     one when the prompt reached it with no transcript, and it never
+      #     contains the phrase (a) looks for. This is what destroyed
+      #     react-grid-layout's index, which had survived (a) for months.
+      #
+      # A false positive here keeps the OLD memory and drops one update, which
+      # is the safe direction; a false negative destroys the index outright.
       is_placeholder() {
-        echo "$1" | grep -qiE '(^|[[:space:]])\(?(none|no (session|project|global|meaningful).*content|no extractable.*|no (project|global) memory|no (new |learnings|updates)|nothing (to |new )?extract)\)?' || \
-        { echo "$1" | grep -qiE '^##[[:space:]]+(Feedback|Key Facts|Architecture|Active Projects|Decisions)[[:space:]]*$' && \
-          [ "$(echo "$1" | grep -cE '^\-' )" -eq 0 ]; }
+        echo "$1" | grep -qiE '(^|[^[:alnum:]])(none|no (session|project|global|meaningful).*content|no extractable|no (project|global) memory|no (new |learnings|updates)|nothing (to |new )?extract)' && return 0
+        echo "$1" | grep -qiE "(i (do not|don'?t) see any|you'?(ve| have) only sent|please paste|(transcript|content|conversation)( was| were)? not provided|no (conversation )?transcript|my job is to)" && return 0
+        echo "$1" | grep -qiE '^##[[:space:]]+(Feedback|Key Facts|Architecture|Active Projects|Decisions)[[:space:]]*$' && \
+          [ "$(echo "$1" | grep -cE '^\-' )" -eq 0 ]
       }
 
       if [ -n "$project_part" ] && [ ${#project_part} -gt 50 ]; then
